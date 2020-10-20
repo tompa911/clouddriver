@@ -59,6 +59,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.ToDoubleFunction
 
 import static com.netflix.spinnaker.cats.agent.AgentDataType.Authority.AUTHORITATIVE
@@ -83,6 +84,7 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
   final CredentialsRepository<NetflixAmazonCredentials> credentialsRepository;
   final ObjectMapper objectMapper
   final AccountReservationDetailSerializer accountReservationDetailSerializer
+  final AtomicReference<Set<String>> vpcOnlyAccountsReference = new AtomicReference<>()
   final MetricsSupport metricsSupport
   final Registry registry
 
@@ -110,7 +112,11 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
   }
 
   private Set<String> determineVpcOnlyAccounts() {
-    def vpcOnlyAccounts = []
+    if (vpcOnlyAccountsReference.get() != null) {
+      return vpcOnlyAccountsReference.get();
+    }
+
+    def vpcOnlyAccounts = new HashSet<>()
 
     accounts.each { credentials ->
       def amazonEC2 = amazonClientProvider.getAmazonEC2(credentials, credentials.regions[0].name)
@@ -123,6 +129,8 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
     }
 
     log.info("VPC Only Accounts: ${vpcOnlyAccounts.join(", ")}")
+    vpcOnlyAccountsReference.set(vpcOnlyAccounts)
+
     return vpcOnlyAccounts
   }
 
@@ -294,6 +302,8 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
       return newOverallReservationDetail
     }
 
+    def vpcOnlyAccounts = determineVpcOnlyAccounts()
+
     credentials.regions.each { AmazonCredentials.AWSRegion region ->
         log.info("Fetching reservation report for ${credentials.name}:${region.name}")
         long startTime = System.currentTimeMillis()
@@ -317,7 +327,6 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
             def osType = operatingSystemType(it.productDescription)
             def reservation = getReservation(region.name, it.availabilityZone, osType.name, it.instanceType)
             reservation.totalReserved.addAndGet(it.instanceCount)
-            def vpcOnlyAccounts = determineVpcOnlyAccounts()
             if (osType.isVpc || vpcOnlyAccounts.contains(credentials.name)) {
               reservation.getAccount(credentials.name).reservedVpc.addAndGet(it.instanceCount)
             } else {
@@ -366,7 +375,7 @@ class ReservationReportCachingAgent implements CachingAgent, CustomScheduledAgen
           recordError(registry, errorsByRegion, credentials, region.name, e)
         }
 
-        log.debug("Took ${System.currentTimeMillis() - startTime}ms to describe instances for ${credentials.name}/${region.name}")
+        log.info("Took ${System.currentTimeMillis() - startTime}ms to describe instances for ${credentials.name}/${region.name}")
       }
   }
 
